@@ -1,0 +1,7 @@
+target/
+__pycache__/
+*.pyc
+*.log
+*.dmp
+/dinput8.dll
+/dist/

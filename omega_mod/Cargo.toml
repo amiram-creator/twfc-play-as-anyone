@@ -1,0 +1,14 @@
+[package]
+name = "omega_mod"
+version = "0.1.0"
+edition = "2021"
+
+# Built as dinput8.dll (32-bit): copy target/i686-pc-windows-msvc/release/dinput8.dll next to TWFC.exe.
+[lib]
+name = "dinput8"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[profile.release]
+panic = "unwind"
+opt-level = 2
