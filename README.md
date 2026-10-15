@@ -7,7 +7,19 @@
 An open-source mod for the PC version of *Transformers: War for Cybertron* (2010). The goal is to make **every character in the game
 playable**. The first release is **Omega Supreme**: play the giant Autobot boss in the campaign, with his real boss-fight attacks.
 
-<!-- Add a gameplay GIF or video link here -->
+## How to play
+
+> First time? [Install](#install) the mod, then:
+
+1. Start the game normally and load any **Decepticon** campaign chapter.
+2. When you are in control, press **F4**. This loads the **Iacon** level with Omega Supreme's data.
+3. You spawn as **Omega Supreme**. The guide appears on the right, and god mode switches on about 2 seconds after you get control (keep the game window in front).
+4. Press **T** to pick an attack and **Q** to use it. Press **F11** while aiming at an enemy to grab it. All keys: [Controls](#controls).
+
+### Video guides
+
+<!-- VIDEO LINKS: replace this comment with the guide videos -->
+*Coming soon.*
 
 ## Features
 
@@ -48,12 +60,6 @@ The installer:
 4. sets the Large Address Aware flag on `TWFC.exe`, so the 32-bit game can use 4 GB of memory for the extra boss data.
 
 Every changed file is backed up first as `<file>.bak-playasanyone`.
-
-## How to play
-
-1. Start the game normally and load any **Decepticon** campaign chapter.
-2. When you are in control, press **F4**. This loads the **Iacon** level with Omega Supreme's data.
-3. You spawn as **Omega Supreme**. The guide appears on the right, and god mode switches on about 2 seconds after you get control (keep the game window in front).
 
 ## Controls
 
