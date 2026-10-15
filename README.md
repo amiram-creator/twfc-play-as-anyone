@@ -18,8 +18,10 @@ playable**. The first release is **Omega Supreme**: play the giant Autobot boss 
 
 ### Video guides
 
-<!-- VIDEO LINKS: replace this comment with the guide videos -->
-*Coming soon.*
+| Showcase | How to play |
+| --- | --- |
+| [![Play as Omega Supreme: showcase](https://img.youtube.com/vi/vwHgbxgSTEI/hqdefault.jpg)](https://youtu.be/vwHgbxgSTEI) | [![How to play as Omega Supreme](https://img.youtube.com/vi/al8oDzRKoaM/hqdefault.jpg)](https://youtu.be/al8oDzRKoaM) |
+| [Watch the showcase](https://youtu.be/vwHgbxgSTEI) | [Watch the guide](https://youtu.be/al8oDzRKoaM) |
 
 ## Features
 
@@ -43,6 +45,7 @@ playable**. The first release is **Omega Supreme**: play the giant Autobot boss 
   different build the mod's hooks check the code first and stay off, so nothing breaks.
 - Windows, and [Python 3](https://www.python.org/downloads/) to run the installer.
 - **Single-player only.** Don't use it online.
+- **Nothing else to download.** No official DLC or other mod is needed: the "DLC pack" the installer copies is a small config file included in this mod, using the game's own DLC-folder support.
 
 ## Install
 
@@ -130,9 +133,20 @@ docs/TECHNICAL.md       technical guide
 ## Credits
 
 - Made by [@amiram-creator](https://github.com/amiram-creator).
-- Community work that helped: Barricade24's War for Cybertron modding package (Coalesced format, DLC map packs, free camera),
-  [TWFC-FPS-Unlocker](https://github.com/StyxSL/TWFC-FPS-Unlocker) (proved DLL loading with this exe) and
-  [WFCDLC](https://github.com/DarkElementPL/WFCDLC) (DLC pack folders).
+
+**Community work this builds on** (knowledge only; none of their files are included or required):
+- **Barricade24**: [War for Cybertron Modding Package](https://www.moddb.com/games/transformers-war-for-cybertron/downloads/transformers-war-for-cybertron-modding-package)
+  (ModDB) and [modding tutorial](https://youtu.be/2KES0jXDhDc). Showed the `PackagesToFullyLoadForDLC` map-pack template this mod's DLC pack uses, the free-camera commands and the console `set` trick.
+- **StyxSL**: [TWFC-FPS-Unlocker](https://github.com/StyxSL/TWFC-FPS-Unlocker). Proved a `dinput8.dll` proxy loads in this exe.
+- **DarkElementPL**: [WFCDLC](https://github.com/DarkElementPL/WFCDLC). Showed that the PC exe loads `DLC\<Pack>\` folders.
+
+**Tools used to make it:**
+[Ghidra](https://ghidra-sre.org/) (NSA),
+[Cheat Engine](https://www.cheatengine.org/) (Dark Byte),
+[x64dbg / x32dbg](https://x64dbg.com/),
+[Rust](https://www.rust-lang.org/),
+[Python](https://www.python.org/) with [minidump](https://github.com/skelsec/minidump), [pefile](https://github.com/erocarrera/pefile) and [Capstone](https://www.capstone-engine.org/),
+[FFmpeg](https://ffmpeg.org/) (videos), and [Claude Code](https://claude.com/claude-code) (Anthropic) as a reverse-engineering and coding assistant.
 
 ## Disclaimer
 
