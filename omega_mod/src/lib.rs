@@ -35,7 +35,6 @@ extern "system" {
     fn GetSystemDirectoryW(buf: *mut u16, n: u32) -> u32;
     fn GetModuleFileNameW(h: HANDLE, buf: *mut u16, n: u32) -> u32;
     fn GetCurrentProcessId() -> u32;
-    fn Beep(freq: u32, dur: u32) -> i32;
     fn Sleep(ms: u32);
 }
 #[link(name = "user32")]
@@ -610,7 +609,7 @@ static STATE: std::sync::Mutex<State> = std::sync::Mutex::new(State {
 });
 fn st() -> std::sync::MutexGuard<'static, State> { STATE.lock().unwrap_or_else(|e| e.into_inner()) }
 
-// T cycles these (beeps = position). Long/short range use the D3B launcher animations with the sockets flipped up.
+// T cycles these (the guide panel shows the active one). Long/short range use the D3B launcher animations with the sockets flipped up.
 const MODES: [(&str, &str); 4] = [
     ("barrage", "Melee_RocketBarrage"),
     ("missile", "Big_Omega_Missile_4thEnc"),
@@ -647,11 +646,6 @@ fn press(vk: u8) {
         Sleep(30);
         keybd_event(vk, sc, 2, 0);
     }
-}
-fn beeps(n: usize) {
-    std::thread::spawn(move || unsafe {
-        for _ in 0..n { Beep(880, 90); Sleep(60); }
-    });
 }
 fn game_in_front() -> bool {
     unsafe {
@@ -828,7 +822,6 @@ fn mod_loop() {
             let m = { let mut g = st(); g.mode = (g.mode + 1) % MODES.len(); g.mode };
             set_melee(4, MODES[m].1);
             missile_sockets(MODES[m].0.starts_with("missile"));
-            beeps(m + 1);
         }
         t_was_down = t_down;
 

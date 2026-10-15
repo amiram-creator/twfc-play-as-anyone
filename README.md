@@ -66,7 +66,7 @@ Every changed file is backed up first as `<file>.bak-playasanyone`.
 | Key | Action |
 | --- | --- |
 | **Q** | Melee: the selected boss attack |
-| **T** | Switch attack: Missile Barrage → Missile Gun (long) → Missile Gun (short) → Ground Pound. One beep per position. |
+| **T** | Switch attack: Missile Barrage → Missile Gun (long) → Missile Gun (short) → Ground Pound. The guide shows the active one. |
 | **F11** | Tractor grab on the enemy under your crosshair: pull, claw crush, throw |
 | **Fire** | Homing rockets from the left arm |
 | **F2** | Shooting Frenzy arm |
