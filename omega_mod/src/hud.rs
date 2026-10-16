@@ -228,7 +228,7 @@ pub const GRAB_TEXT: [(&str, u32); 4] = [
 ];
 
 #[derive(PartialEq, Clone, Copy)]
-pub struct View { pub mode: usize, pub grab: usize, pub god: u8 } // god: 0 unknown, 1 off, 2 on
+pub struct View { pub mode: usize, pub grab: usize, pub god: u8, pub ground: bool } // god: 0 unknown, 1 off, 2 on; ground: at the mission spawn (F12)
 
 static LAST: Mutex<Option<(View, u32)>> = Mutex::new(None);
 
@@ -252,7 +252,7 @@ fn bgr(c: u32) -> u32 { ((c & 0xFF) << 16) | (c & 0xFF00) | (c >> 16) }
 unsafe fn render(view: View, modes: &[&str], screen_h: u32) -> Option<Image> {
     let u = (screen_h as f32 / 1080.0).max(0.5); // 1.0 at 1080p
     let s = |v: f32| (v * u).round() as i32;
-    let (w, h) = (s(330.0), s(470.0));
+    let (w, h) = (s(330.0), s(526.0));
 
     let dc = CreateCompatibleDC(std::ptr::null_mut());
     // BITMAPINFOHEADER: top-down 32-bit
@@ -307,11 +307,12 @@ unsafe fn render(view: View, modes: &[&str], screen_h: u32) -> Option<Image> {
     rect(pad, y, w - 2 * pad, s(1.0), 0x3A3A3A);
     y += s(12.0);
     let (gt, gc) = GRAB_TEXT[view.grab.min(3)];
-    let rows: [(&str, &str, Option<(&str, u32)>); 5] = [
+    let rows: [(&str, &str, Option<(&str, u32)>); 6] = [
         ("F11", "tractor grab", Some((gt, gc))),
         ("Fire", "homing rockets", None),
         ("F2", "frenzy gun", None),
         ("F8", "god mode", match view.god { 2 => Some(("ON", 0x7CFF8C)), 1 => Some(("off", DIM)), _ => None }),
+        ("F12", "sky arena / mission", Some(if view.ground { ("mission spawn", WHITE) } else { ("sky arena", DIM) })),
         ("Home", "hide this guide", None),
     ];
     for (key, what, status) in rows {

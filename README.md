@@ -7,6 +7,13 @@
 An open-source mod for the PC version of *Transformers: War for Cybertron* (2010). The goal is to make **every character in the game
 playable**. The first release is **Omega Supreme**: play the giant Autobot boss in the campaign, with his real boss-fight attacks.
 
+## Playable characters
+
+| Character | Status |
+| --- | --- |
+| **Omega Supreme** (robot form) | Playable: his model, animations and real boss attacks |
+| **Omega Supreme ship form** | 🚧 Very work in progress: transform into his own ship and fly it, with his ship guns and rocket barrage |
+
 ## How to play
 
 > First time? [Install](#install) the mod, then:
@@ -15,6 +22,10 @@ playable**. The first release is **Omega Supreme**: play the giant Autobot boss 
 2. When you are in control, press **F4**. This loads the **Iacon** level with Omega Supreme's data.
 3. You spawn as **Omega Supreme**. The guide appears on the right, and god mode switches on about 2 seconds after you get control (keep the game window in front).
 4. Press **T** to pick an attack and **Q** to use it. Press **F11** while aiming at an enemy to grab it. All keys: [Controls](#controls).
+5. A few seconds after you spawn, you are lifted onto the **sky arena**, a huge open floor above Iacon with room for a giant. Press
+   **F12** (robot form) to go to the mission's own spawn point, and **F12** again to go back up.
+
+If you spawn as Megatron, or Omega is stuck in the ground, **restart from the last checkpoint** once (pause menu).
 
 ### Video guides
 
@@ -33,6 +44,10 @@ playable**. The first release is **Omega Supreme**: play the giant Autobot boss 
   - **Ground Pound (AOE)**: a shock wave around him.
   - **Tractor Grab**: the real boss grab. He pulls an enemy into his claw, crushes it and throws it away.
   - **Homing rockets** from his left arm on the fire button, plus his **Shooting Frenzy** arm.
+- **Ship form** (very work in progress): Omega transforms into his own ship, with its hover, boost and engine effects, his ship
+  machine guns, ship rockets and the homing rocket barrage.
+- **Sky arena**: a 37,000 x 37,000 floor spawned above Iacon, so the giant has room to move and fight. Fall off and you are put back
+  on it. **F12** switches between the arena and the mission's own spawn point.
 - **Auto-targeting**: rockets go for the enemy you aim at, or spread over the nearest enemies in front of you.
 - **On-screen guide** on the right of the screen. It shows the active attack mode live, the grab status, god mode and every key.
 - **God mode turns on by itself** when you spawn as Omega.
@@ -58,9 +73,10 @@ playable**. The first release is **Omega Supreme**: play the giant Autobot boss 
 
 The installer:
 1. adds the mod's key bindings to `Coalesced.ini`;
-2. copies a small DLC pack that loads Omega Supreme into the Iacon level;
-3. copies `dinput8.dll` (the mod) next to `TWFC.exe`;
-4. sets the Large Address Aware flag on `TWFC.exe`, so the 32-bit game can use 4 GB of memory for the extra boss data.
+2. edits one weapon entry in `Coalesced.ini`, so the ship form fires a jet machine gun (it would fire a tank cannon otherwise);
+3. copies a small DLC pack that loads Omega Supreme and his ship into the Iacon level;
+4. copies `dinput8.dll` (the mod) next to `TWFC.exe`;
+5. sets the Large Address Aware flag on `TWFC.exe`, so the 32-bit game can use 4 GB of memory for the extra boss data.
 
 Every changed file is backed up first as `<file>.bak-playasanyone`.
 
@@ -74,6 +90,7 @@ Every changed file is backed up first as `<file>.bak-playasanyone`.
 | **Fire** | Homing rockets from the left arm |
 | **F2** | Shooting Frenzy arm |
 | **F8** | God mode on/off |
+| **F12** | Robot form: switch between the sky arena and the mission's spawn point |
 | **Home** | Hide / show the guide |
 | **F6 / F7** | Slow motion on / off (for videos) |
 | **F4** | Load the Iacon level as Omega Supreme |
@@ -89,12 +106,16 @@ This restores `Coalesced.ini` and `TWFC.exe` from their backups and removes the 
 
 - Omega only appears in the Iacon level (his data only exists in his own levels; the DLC pack loads it there).
 - He is huge: narrow streets and doorways can block him. His collision is reduced so he fits through most of the level.
-- Transforming gives Megatron's tank, and the HUD and a small gun model are Megatron's: Omega borrows Megatron's player setup.
+- The ship form is very work in progress: it has no transform animation, the climb (C) has no animation, and right after loading
+  the level the ship's gun is a plain jet machine gun until you restart from a checkpoint once.
+- The HUD and a small gun model are Megatron's: Omega borrows Megatron's player setup.
+- F12 works in robot form only (the game can't teleport a vehicle).
 - Auto-targeting picks Autobots, which are the enemies in the Decepticon campaign.
 
 ## Troubleshooting
 
-- **Still Megatron?** Make sure you loaded Iacon with **F4** (or the Iacon chapter as Megatron).
+- **Still Megatron?** Make sure you loaded Iacon with **F4** (or the Iacon chapter as Megatron), then restart from the last checkpoint once.
+- **Stuck on the sky arena or somewhere in the level?** Press **F12** in robot form.
 - **Something went wrong?** The mod writes `Binaries\omega_mod.log`. Crash dumps are in `%LOCALAPPDATA%\CrashDumps`. Please attach both when you open an issue.
 
 ## Build from source
@@ -123,7 +144,7 @@ Pull requests, issues and new characters are welcome.
 
 ```
 install.py              installer / uninstaller
-mod/                    key bindings + DLC pack (Iacon loads Omega's packages)
+mod/                    key bindings, config edits (replace.txt) + DLC pack (Iacon loads Omega's packages)
 omega_mod/              the mod (Rust, builds dinput8.dll)
 tools/                  research and modding tools (Python)
 cheat-engine/           Cheat Engine Lua prototype

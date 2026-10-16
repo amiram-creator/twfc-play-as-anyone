@@ -25,7 +25,8 @@ local GRAFT = {
   0x140, -- wounded
   0x148, 0x14C, 0x150, -- defrag material, arm part mesh/anim
   0x160, -- overshield material
-  0x164, 0x168, 0x16C, -- TArray (data, num, max), 1 element on Megatron
+  -- NOT 0x164..0x16C (BuffMaterials, a TArray header): copying it makes two ROBODEFs share one heap buffer = double free when
+  -- the level unloads, crash on the next chapter load (docs/TECHNICAL.md)
 }
 
 local names = {}

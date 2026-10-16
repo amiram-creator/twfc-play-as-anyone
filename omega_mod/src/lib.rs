@@ -36,6 +36,7 @@ extern "system" {
     fn GetModuleFileNameW(h: HANDLE, buf: *mut u16, n: u32) -> u32;
     fn GetCurrentProcessId() -> u32;
     fn Sleep(ms: u32);
+    fn AddVectoredExceptionHandler(first: u32, handler: extern "system" fn(*const u32) -> i32) -> *mut c_void;
 }
 #[link(name = "user32")]
 extern "system" {
@@ -139,8 +140,10 @@ unsafe fn patch_jmp(at: u32, target: u32) {
 const GNAMES: u32 = 0x12B2_F0F4;
 const GOBJECTS: u32 = 0x12B2_F0A4;
 const CID_ROBODEF: u32 = 1879; // TnTransformer
-const CID_PC: u32 = 3460; // TnPlayerControllerCampaign (live subclass)
-const CID_PRI: u32 = 1820; // TnPlayerReplicationInfo
+const CID_CHASSIS: u32 = 1743; // TnDataProvider_Chassis
+// player controller / replication info classes: campaign, and Escalation (TnSurvivalGame) which has its own subclasses
+const CID_PCS: [u32; 2] = [3460, 3464]; // TnPlayerControllerCampaign, TnPlayerControllerSurvival
+const CID_PRIS: [u32; 2] = [1820, 3465]; // TnPlayerReplicationInfo, TnPlayerReplicationInfoSurvival
 
 thread_local! {
     // per thread: the game thread (chassis hook) and the mod thread both resolve names
@@ -165,6 +168,12 @@ fn fname(id: u32) -> String {
         s
     });
     if num > 0 { format!("{base}_{}", num - 1) } else { base }
+}
+
+// FName id (idx << 14, number 0) of an existing name; full name-table scan, so only for one-off setup
+fn name_id(want: &str) -> Option<u32> {
+    let (tab, n) = (r(GNAMES), r(GNAMES + 4));
+    (0..n).find(|&i| { let e = r(tab + i * 4); e != 0 && fname(i << 14) == want }).map(|i| i << 14)
 }
 
 #[derive(Clone, Copy)]
@@ -245,15 +254,16 @@ static mut OMEGA_REF: [u32; 3] = [0; 3];
 static mut OMEGA_WSTR: [u16; 18] = [0; 18];
 #[no_mangle]
 static mut OMEGA_DESC: [u8; 0x40] = [0; 0x40];
-// Omega's ROBODEF path for the chassis FString (never freed).
-static mut OMEGA_PATH: [u16; 64] = [0; 64];
-static mut TANK_ORIG: Option<(u32, u32, u32)> = None;
+// The chassis Tank's original ObjectPath text (restored on maps without Omega).
+static mut TANK_ORIG: Option<String> = None;
 static mut OMEGA_LOADED: bool = false;
 
 const OMEGA_PATH_STR: &str = "TR_OmegaSupreme_ROBODEF_p.OmegaSupreme_ROBODEF";
 // ROBODEF player fields boss ROBODEFs leave empty (docs/TECHNICAL.md, "graft"). Not grafted: +0x11C HitReactionBlueprint
-// (Megatron's RobotHitReactions made the giant's body flinch hard on every hit; Omega keeps none).
-const GRAFT: [u32; 18] = [0xA4, 0xA8, 0xB0, 0xD4, 0xE8, 0xF0, 0xF4, 0xF8, 0x104, 0x138, 0x140, 0x148, 0x14C, 0x150, 0x160, 0x164, 0x168, 0x16C];
+// (Megatron's RobotHitReactions made the giant's body flinch hard on every hit; Omega keeps none). Not grafted: +0x164..0x16C
+// BuffMaterials, a TArray header: copying it made both ROBODEFs own one heap buffer, freed twice when Iacon unloads -> corrupted
+// allocator -> crash on the next chapter load (docs/TECHNICAL.md). Only object references are safe to copy.
+const GRAFT: [u32; 15] = [0xA4, 0xA8, 0xB0, 0xD4, 0xE8, 0xF0, 0xF4, 0xF8, 0x104, 0x138, 0x140, 0x148, 0x14C, 0x150, 0x160];
 
 // ------------------------------------------------------------------------------------------------ caves
 
@@ -391,6 +401,40 @@ unsafe extern "C" fn grab_cave() {
     );
 }
 
+// Sky arena (docs/TECHNICAL.md): [factory, pending, spawned actor, calls, location xyz, rotation pyr]. F12 is bound to
+// HmCheatManager.ToggleDebugCamera; that UFunction's native pointer (+0x68) is redirected here (not the code: script
+// functions share it). With `pending` set it spawns the floor via the factory's CreateActor (vtable +0x12C); otherwise
+// it does nothing (the debug camera is not used).
+#[no_mangle]
+static mut ARENA: [u32; 10] = [0; 10];
+
+#[unsafe(naked)]
+unsafe extern "C" fn arena_cave() {
+    naked_asm!(
+        "pushad",
+        "cmp dword ptr [{a}+4], 0",
+        "je 2f",
+        "mov dword ptr [{a}+4], 0",
+        "push 0",
+        "push 0",
+        "push 0",
+        "push 0",
+        "lea eax, [{a}+28]",
+        "push eax",
+        "lea eax, [{a}+16]",
+        "push eax",
+        "mov ecx, dword ptr [{a}]",
+        "mov eax, [ecx]",
+        "call dword ptr [eax+0x12C]",
+        "mov dword ptr [{a}+8], eax",
+        "inc dword ptr [{a}+12]",
+        "2:",
+        "popad",
+        "ret 8",
+        a = sym ARENA,
+    );
+}
+
 unsafe fn install_caves() {
     // expected original bytes (refuse to patch an unknown exe)
     let checks: [(u32, &[u8]); 3] = [
@@ -411,6 +455,61 @@ unsafe fn install_caves() {
     patch_jmp(0x10B3_9DA0, target_cave as usize as u32);
     patch_jmp(0x117E_8670, grab_cave as usize as u32);
     log("caves installed: chassis path, rocket targets, F11 grab");
+    AddVectoredExceptionHandler(1, crash_logger);
+}
+
+// Crash logger: the game's crash dumps only show its shutdown code (a destructor at TWFC.exe+0x8A6D53), not the
+// real fault. Log the first few access violations (first chance) with registers and TWFC.exe return addresses.
+static CRASH_LOGS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+extern "system" fn crash_logger(ptrs: *const u32) -> i32 {
+    unsafe {
+        let rec = *ptrs as *const u32;
+        let ctx = *ptrs.add(1) as *const u32;
+        if *rec != 0xC000_0005 || CRASH_LOGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 6 {
+            return 0; // EXCEPTION_CONTINUE_SEARCH
+        }
+        let c = |off: usize| *ctx.add(off / 4);
+        let (eip, esp) = (c(0xB8), c(0xC4));
+        let mut ret = Vec::new();
+        for i in 0..256u32 {
+            if let Some(v) = rd32(esp + i * 4) {
+                if (0x1090_0000..0x12E0_A000).contains(&v) && ret.len() < 16 { ret.push(format!("{v:08X}")); }
+            }
+        }
+        log(&format!(
+            "ACCESS VIOLATION at {eip:08X} ({} {:08X}) eax {:08X} ebx {:08X} ecx {:08X} edx {:08X} esi {:08X} edi {:08X} ebp {:08X} esp {esp:08X}
+  stack: {}",
+            if *rec.add(5) == 0 { "read" } else { "write" }, *rec.add(6),
+            c(0xB0), c(0xA4), c(0xAC), c(0xA8), c(0xA0), c(0x9C), c(0xB4), ret.join(" ")));
+        // which objects were involved: registers and the first stack slots that hold a game object
+        let mut objs = Vec::new();
+        let regs = [("eax", 0xB0), ("ebx", 0xA4), ("ecx", 0xAC), ("edx", 0xA8), ("esi", 0xA0), ("edi", 0x9C), ("ebp", 0xB4)];
+        for (n, off) in regs { if let Some(d) = crash_obj(c(off)) { objs.push(format!("{n}={d}")); } }
+        for i in 0..64u32 {
+            if let Some(d) = rd32(esp + i * 4).and_then(crash_obj) { objs.push(format!("esp+{:X}={d}", i * 4)); }
+        }
+        if !objs.is_empty() { log(&format!("  objects: {}", objs.join(" | "))); }
+    }
+    0
+}
+
+// "Outer.Name cid" if v looks like a live UObject (vtable in TWFC.exe), for the crash logger: plain reads, no name cache
+// (the handler may run inside fname on our own thread).
+fn crash_obj(v: u32) -> Option<String> {
+    if !(0x10000..0x8000_0000).contains(&v) || !(0x1090_0000..0x1300_0000).contains(&rd32(v)?) { return None; }
+    let name = |o: u32| -> Option<String> {
+        let id = rd32(o + 4)?;
+        let b = rbuf(rd32(rd32(GNAMES)? + (id >> 14) * 4)? + 8, 128)?;
+        let u: Vec<u16> = b.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
+        let s = String::from_utf16_lossy(&u);
+        if s.is_empty() { return None; }
+        Some(if id & 0x3FFF != 0 { format!("{s}_{}", (id & 0x3FFF) - 1) } else { s })
+    };
+    let me = name(v)?;
+    let oi = (rd32(v + 0x24)? >> 4).wrapping_sub(1);
+    let outer = if oi < 0x40_0000 { rd32(rd32(GOBJECTS)? + oi * 4).and_then(name) } else { None };
+    let cid = (rd32(v + 0x14)? & 0xFFF).wrapping_sub(1);
+    Some(format!("{}{me} cid={cid}", outer.map(|o| o + ".").unwrap_or_default()))
 }
 
 // ------------------------------------------------------------------------------------------------ game-thread setup
@@ -432,6 +531,90 @@ extern "C" fn on_chassis_read(esi: u32, stack: u32) {
 
 static mut PREPARED: (u32, u32) = (0, 0); // (Omega ROBODEF, its FName) we already prepared
 
+static mut EARLY_SEEN: Option<(u32, std::time::Instant)> = None; // (Omega ROBODEF, first seen)
+
+// Chassis ObjectPath (+0x78 FString: data, count, max). The engine owns that buffer and reallocates/frees it when it re-reads the
+// ini at chapter load, so it must always be a GMalloc block: pointing it at the DLL's static array (and restoring a saved pointer)
+// corrupted the allocator, crash on the next chapter load (docs/TECHNICAL.md). Each set gets a fresh block; the previous one is
+// leaked on purpose (freeing it from this thread could race a game-thread reader), ~128 bytes per level change.
+const GMALLOC: u32 = 0x12B0_0204;
+const PATH_CAP: u32 = 64;
+
+fn engine_alloc(bytes: u32) -> u32 {
+    let m = r(GMALLOC);
+    if m == 0 { return 0; }
+    // FMalloc vtable +0xC = Realloc(ptr, size, alignment); Realloc(0, n, 8) allocates (as the engine's TArray code does, 1091F196)
+    let f: extern "thiscall" fn(u32, u32, u32, u32) -> u32 = unsafe { std::mem::transmute(r(r(m) + 0xC) as usize) };
+    f(m, 0, bytes, 8)
+}
+
+fn fstring(a: u32) -> String {
+    let (d, n) = (r(a), r(a + 4));
+    if d == 0 || n == 0 || n > 512 { return String::new(); }
+    rbuf(d, (n as usize - 1) * 2)
+        .map(|b| String::from_utf16_lossy(&b.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()))
+        .unwrap_or_default()
+}
+
+fn chassis_is_omega(ch: u32) -> bool { fstring(ch + 0x78) == OMEGA_PATH_STR }
+
+fn set_chassis_path(ch: u32, text: &str) -> bool {
+    let u: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    if u.len() as u32 > PATH_CAP { return false; }
+    let buf = engine_alloc(PATH_CAP * 2);
+    if buf == 0 { return false; }
+    unsafe { std::ptr::copy_nonoverlapping(u.as_ptr(), buf as *mut u16, u.len()); }
+    // pointer first: the old count is never larger than either buffer's 64 chars, so a reader in between stays in bounds
+    w(ch + 0x78, buf); w(ch + 0x7C, u.len() as u32); w(ch + 0x80, PATH_CAP);
+    true
+}
+
+fn point_chassis_at_omega(ch: u32) {
+    if chassis_is_omega(ch) { return; }
+    let cur = fstring(ch + 0x78);
+    if !cur.is_empty() { unsafe { TANK_ORIG = Some(cur); } }
+    set_chassis_path(ch, OMEGA_PATH_STR);
+}
+
+fn early_tank_flip() {
+    let s = snapshot();
+    ship_weapons(&s);
+    let Some(ch) = s.find_cls(CID_CHASSIS, "Tank") else { return };
+    if chassis_is_omega(ch) {
+        // Omega unloaded (back at the menu): restore Megatron's path NOW. Choosing Megatron at chapter select looks the chassis up by
+        // its path before the next hooked read; with Omega's path still in it the lookup found nothing and the game crashed on the
+        // null chassis (10B0521F, obj +0x56C), seen 2026-10-16. The lazy restore in chassis_read ran inside that same call, too late.
+        if s.find_cls(CID_ROBODEF, "OmegaSupreme_ROBODEF").is_none() {
+            // the ini's value (TransCustomization.ini [Tank]) if the original was never seen
+            let o = unsafe { TANK_ORIG.clone() }.unwrap_or_else(|| "TR_Megatron_ROBODEF_p.Megatron_ROBODEF".into());
+            if set_chassis_path(ch, &o) { log("Omega unloaded: chassis Tank restored to Megatron"); }
+            unsafe { OMEGA_LOADED = false; PREPARED = (0, 0); }
+        }
+        return;
+    }
+    let (Some(omega), Some(mega)) = (s.find_cls(CID_ROBODEF, "OmegaSupreme_ROBODEF"), s.find_cls(CID_ROBODEF, "Megatron_ROBODEF")) else { return };
+    // wait for the jet donor (Balcony_DSN_m loads after Omega's packages): flipping before it gave the first pawn Megatron's tank
+    // form, which is fixed at spawn (seen 2026-10-16). Maps without the donor (Escalation) flip after 8 s with the tank fallback.
+    unsafe {
+        let now = std::time::Instant::now();
+        let seen = match EARLY_SEEN { Some((o, t)) if o == omega => t, _ => { EARLY_SEEN = Some((omega, now)); now } };
+        if s.find_cls(CID_ROBODEF, "SoldierJetDec_ROBODEF").is_none() && now.duration_since(seen).as_secs() < 8 { return; }
+    }
+    // the first pawn can spawn from this path before the hooked chassis read (prepare_data), and its vehicle form (class, mesh) is
+    // built from ROBODEF +0xA4 at spawn: put the ship in BEFORE the graft and the flip. Doing it after raced the game thread, which
+    // built the pawn in between from the grafted MegatronVehicleForm (seen 2026-10-16: TnTankForm with Megatron's mesh, jet camera).
+    ship_form(&s);
+    // graft the player parts (health, hit reactions, melee set...) BEFORE the flip: the game may build Omega from this path at once,
+    // and without them he spawns "dead" (seen 2026-10-16 in Iacon and Escalation). Same rule as chassis_read: only empty fields.
+    for off in GRAFT {
+        if r(omega + off) == 0 { w(omega + off, r(mega + off)); }
+    }
+    // jets have no transform momentum (+0xE8): ship_form cleared it, the graft just refilled it from Megatron
+    if r(omega + 0xA4) != r(mega + 0xA4) { w(omega + 0xE8, 0); }
+    point_chassis_at_omega(ch);
+    log("early: chassis Tank path -> Omega (Omega's ROBODEF loaded)");
+}
+
 fn chassis_read(esi: u32) {
     let ch = esi.wrapping_sub(0x10);
     if fname(r(ch + 4)) != "Tank" {
@@ -441,12 +624,7 @@ fn chassis_read(esi: u32) {
     unsafe {
         let (b, n) = PREPARED;
         if b != 0 && r(b + 4) == n && OMEGA_LOADED {
-            let our = OMEGA_PATH.as_ptr() as u32;
-            if r(ch + 0x78) != our {
-                if r(ch + 0x78) != 0 { TANK_ORIG = Some((r(ch + 0x78), r(ch + 0x7C), r(ch + 0x80))); }
-                let len = OMEGA_PATH_STR.len() as u32 + 1;
-                w(ch + 0x78, our); w(ch + 0x7C, len); w(ch + 0x80, len);
-            }
+            point_chassis_at_omega(ch);
             return;
         }
     }
@@ -454,20 +632,9 @@ fn chassis_read(esi: u32) {
     let omega = s.find_cls(CID_ROBODEF, "OmegaSupreme_ROBODEF");
     let mega = s.find_cls(CID_ROBODEF, "Megatron_ROBODEF");
     unsafe {
-        let our = OMEGA_PATH.as_ptr() as u32;
-        let cur = (r(ch + 0x78), r(ch + 0x7C), r(ch + 0x80));
         match (omega, mega) {
             (Some(b), Some(d)) => {
-                if cur.0 != our {
-                    TANK_ORIG = Some(cur);
-                }
-                for (i, c) in OMEGA_PATH_STR.encode_utf16().enumerate() {
-                    OMEGA_PATH[i] = c;
-                }
-                let n = OMEGA_PATH_STR.len() as u32 + 1;
-                w(ch + 0x78, our);
-                w(ch + 0x7C, n);
-                w(ch + 0x80, n);
+                point_chassis_at_omega(ch);
                 let mut grafted = 0;
                 for off in GRAFT {
                     if r(b + off) == 0 {
@@ -478,7 +645,7 @@ fn chassis_read(esi: u32) {
                 OMEGA_LOADED = true;
                 // the first spawn takes the character from the player's PlayerReplicationInfo (+0x420 = ROBODEF in use,
                 // set during loading); the chassis path is only re-read on a respawn. Point it at Omega too.
-                for o in s.objs.iter().filter(|o| o.cls == CID_PRI) {
+                for o in s.objs.iter().filter(|o| CID_PRIS.contains(&o.cls)) {
                     if r(o.addr + 0x420) == d {
                         w(o.addr + 0x420, b);
                         log("PlayerReplicationInfo ROBODEF Megatron -> Omega");
@@ -489,12 +656,8 @@ fn chassis_read(esi: u32) {
                 log(&format!("chassis Tank -> Omega Supreme ({grafted} fields grafted)"));
             }
             _ => {
-                if cur.0 == our {
-                    if let Some(o) = TANK_ORIG {
-                        w(ch + 0x78, o.0);
-                        w(ch + 0x7C, o.1);
-                        w(ch + 0x80, o.2);
-                    }
+                if chassis_is_omega(ch) {
+                    if let Some(o) = TANK_ORIG.clone() { set_chassis_path(ch, &o); }
                     log("Omega not loaded here: chassis Tank restored to Megatron");
                 }
                 OMEGA_LOADED = false;
@@ -585,7 +748,267 @@ fn prepare_data(s: &Snap, omega: u32) {
         g.omega_robodef = omega;
     }
     melee_defaults();
+    ship_form(s);
 }
+
+// Omega's own vehicle form (docs/TECHNICAL.md): his ship on a JET form. No Omega VEHDEF exists, so a player plane form gets the
+// ship's look. Donor: the Decepticon seeker drone SoldierJetDec (TnPlaneFormBlueprint; shared with AI seekers, none in Iacon).
+// VehicleForm fields: +0x28 SkeletalMesh, +0x2C PhysicsAsset, +0x30 AnimTree (kept: the jet's VEH_Plane_ANIMTREE, which the plane
+// form drives), +0x34 AnimSets (1 entry, swapped in place: the engine owns the buffer). Omega ROBODEF: +0xA4 VehicleForm,
+// +0xA8 camera set (the jet's Plane_Starscream_CAMSET), +0xE8 transform momentum (null for jets). Ship assets come from the DLC
+// pack (D3B_IAC_Base_m mesh, D3B_IAC_GLB_DSN_m / Balcony_DSN_m physics; the D5 cinematic mesh as fallback).
+// Without the jet donor (other maps) the ship goes on Megatron's hover tank instead.
+fn ship_form(s: &Snap) {
+    let mesh = s.find("VH_OmegaSupreme_SKEL").or_else(|| s.find("VH_VIGOmegaSupreme_SKEL"));
+    let set = s.objs.iter().find(|o| fname(o.name) == "OmegaSupreme_VEH" && s.outer_name(o) == "TR_OmegaSupreme_ANM_p").map(|o| o.addr);
+    let (Some(mesh), Some(set)) = (mesh, set) else { log("ship form: ship mesh or anim set not loaded"); return };
+    let phys = s.find("VH_OmegaSupreme_PHYSSYS");
+    let look = |vf: u32| {
+        w(vf + 0x28, mesh);
+        if let Some(p) = phys { w(vf + 0x2C, p); }
+        let (data, n) = (r(vf + 0x34), r(vf + 0x38));
+        if data != 0 && n >= 1 { w(data, set); }
+    };
+    let jet = s.find_cls(CID_ROBODEF, "SoldierJetDec_ROBODEF");
+    let omega = s.find_cls(CID_ROBODEF, "OmegaSupreme_ROBODEF");
+    if let (Some(jrd), Some(omega)) = (jet, omega) {
+        let vf = r(jrd + 0xA4);
+        look(vf);
+        // gun sockets (TnVehicleFormBlueprint +0x88 WeaponSockets, FName array): the drone's WeaponSocket_Primary/2 don't exist on
+        // the ship; fire from the fronts of the two engines (ship sockets L_Rocket1 / R_Rocket1). Entries swapped in place.
+        if let (Some(l), Some(rr)) = (name_id("L_Rocket1"), name_id("R_Rocket1")) {
+            let (d, k) = (r(vf + 0x88), r(vf + 0x8C));
+            if d != 0 && k >= 2 { w(d, l); w(d + 4, rr); }
+        }
+        w(omega + 0xA4, vf);
+        w(omega + 0xA8, r(jrd + 0xA8));
+        w(omega + 0xE8, 0);
+        ship_jet_tuning(s, set);
+        log(&format!("ship form: jet {} with mesh {}, camera {}", fname(r(vf + 4)), fname(r(mesh + 4)), fname(r(r(jrd + 0xA8) + 4))));
+        return;
+    }
+    // fallback: Megatron's hover tank with the ship's look and tree, camera pulled back (incl. OrbitDistancesByPCS +0x38)
+    let Some(vf) = s.find("MegatronVehicleForm") else { return };
+    look(vf);
+    if let Some(t) = s.find("VEH_OmegaSupreme_ANIMTREE") { w(vf + 0x30, t); }
+    for o in &s.objs {
+        if s.name(o).starts_with("TnLocationOffsetCameraBehavior_") && s.outer_name(o) == "Tank_Megatron_STRATEGY" {
+            wf(o.addr + 0x34, 25000.0); wf(o.addr + 0x2C, 0.0); wf(o.addr + 0x30, 7000.0);
+            let (d, k) = (r(o.addr + 0x38), r(o.addr + 0x3C));
+            for e in 0..k.min(16) { wf(d + e * 16 + 0xC, 25000.0 * 1.05); }
+        }
+    }
+    log("ship form: no jet donor here, ship on Megatron's tank form");
+}
+
+// Omega's ship guns (docs/TECHNICAL.md). The vehicle weapons stay the jet CLASSES (cooked into every map, resolved at chapter load:
+// ini [TankCannon] -> TnWeaponAssaultRiflePlane), Omega's ship weapons are only their DATA: weapon +0x244 PlayerData (AI reads +0x248
+// AiData, so AI jets keep theirs). Second slot: Megatron_PCD_SP +0x128 VehicleWeapons (TArray of FStrings) swapped with Skywarp_PCD_SP's
+// [PlaneAssaultRifle, HomingRocketVehicle]; only effective before a chapter loads (PCDs exist from the main menu). Headers are swapped, never
+// aliased, so each engine buffer keeps one owner. Muzzles: the weapon meshes look their socket names (+0xE4, 4-byte FNames) up on the ship
+// skeleton; the jet's WeaponSocket_Primary/2 are missing there and left projectiles at the world origin -> L_Rocket1 / R_Rocket1,
+// on the mesh templates (weapon default +0x28C; new meshes copy them) and on live player meshes (weapon +0x290 list, +0x294 count).
+const SHIP_GUNS: [(&str, &str); 2] = [
+    ("TnWeaponAssaultRiflePlane", "OmegaMGSentry_WEPDATA"),       // slot 1: MG bursts
+    ("TnWeaponHomingRocketVehicle", "OmegaRocketSentry_WEPDATA"), // slot 2: ship rockets
+];
+
+fn ship_weapons(s: &Snap) {
+    if let (Some(m), Some(k)) = (s.find("Megatron_PCD_SP"), s.find("Skywarp_PCD_SP")) {
+        if r(m + 0x12C) == 1 && r(k + 0x12C) == 2 {
+            for off in [0x128, 0x12C, 0x130] { let (a, b) = (r(m + off), r(k + off)); w(m + off, b); w(k + off, a); }
+            log("ship guns: Megatron gets the jets' two vehicle weapons (PCD swap with Skywarp)");
+        }
+    }
+    let (Some(l), Some(rr)) = (name_id_cached("L_Rocket1"), name_id_cached("R_Rocket1")) else { return };
+    let sockets = |mesh: u32| {
+        let (d, n) = (r(mesh + 0xE4), r(mesh + 0xE8));
+        if d != 0 && (1..=8).contains(&n) {
+            for j in 0..n { let v = if j % 2 == 0 { l } else { rr }; if r(d + j * 4) != v { w(d + j * 4, v); } }
+        }
+    };
+    // Class defaults and their mesh templates only: a weapon takes PlayerData and socket names when it is created (live-only writes
+    // left the jet MG, user test 2026-10-16), so the first pawn keeps the jet's until a respawn (checkpoint restart). Never write live
+    // weapons from this 0.5 s tick: at level teardown their mesh arrays are freed while the objects are still listed, and the writes
+    // corrupted the allocator (crash on the next chapter load, docs/TECHNICAL.md). Write only on change to keep even these rare.
+    for (cls, data) in SHIP_GUNS {
+        let (Some(def), Some(data)) = (s.find(&format!("Default__{cls}")), s.find(data)) else { continue };
+        if r(def + 0x244) != data { w(def + 0x244, data); }
+        let tmpl = r(def + 0x28C);
+        if tmpl != 0 { sockets(tmpl); }
+    }
+}
+
+// name_id scans the whole name table: cache the ids (names never move)
+fn name_id_cached(want: &'static str) -> Option<u32> {
+    thread_local! { static C: std::cell::RefCell<HashMap<&'static str, u32>> = std::cell::RefCell::new(HashMap::new()); }
+    if let Some(v) = C.with(|c| c.borrow().get(want).copied()) { return Some(v); }
+    let v = name_id(want)?;
+    C.with(|c| c.borrow_mut().insert(want, v));
+    Some(v)
+}
+
+// Barrage (B): the live jet-tree node playing Rocket_TellHoverLoop_VEH (ascend node, SHIP_ANIM_MAP). AnimNodeSequence +0xAC AnimSeqName,
+// +0xB4 flags (bNoNotifies 0x100), +0xB8 CurrentTime, +0xC0 AnimSeq (0 on the template). Notifies stay blocked; B plays one cycle.
+const BARRAGE_CYCLE: f32 = 2.7; // the last SpawnProjectile notify is at 2.5 s
+
+fn barrage_node(s: &Snap) -> u32 {
+    let Some(id) = name_id_cached("Rocket_TellHoverLoop_VEH") else { return 0 };
+    s.objs.iter()
+        .find(|o| r(o.addr + 0xAC) == id && r(o.addr + 0xC0) != 0 && fname(o.name).starts_with("AnimNodeSequence"))
+        .map(|o| o.addr).unwrap_or(0)
+}
+
+fn barrage_block(node: u32, on: bool) {
+    let f = r(node + 0xB4);
+    w(node + 0xB4, if on { f | 0x100 } else { f & !0x100 });
+}
+
+// Jet node (VEH_Plane_ANIMTREE template, AnimNodeSequence +0xAC AnimSeqName) -> ship sequence, from the user's preview review
+// (docs/TECHNICAL.md; preview numbers in brackets). One ship anim can serve several nodes.
+const SHIP_ANIM_MAP: [(&str, &str); 11] = [
+    ("Nav_Hover_Pose_VEH", "Nav_Hover_IdleShort_VEH"),   // [23] hover idle
+    ("Nav_Hover_F_VEH", "Nav_Hover_IdleShort_VEH"),      // W/S: steady engines
+    ("Nav_Hover_B_VEH", "Nav_Hover_IdleShort_VEH"),
+    ("Nav_Hover_L_VEH", "Nav_Boost_L_VEH"),              // [15] steer left (A)
+    ("Nav_Hover_R_VEH", "Nav_Boost_R_VEH"),              // [19]
+    ("Nav_Boost_VEH", "Nav_Boost_F_VEH"),                // [13] boost (hold right mouse)
+    ("Nav_Boost_L_VEH", "Nav_Boost_F_VEH"),              // boost turns keep the boost pose (turn poses fold the engines)
+    ("Nav_Boost_R_VEH", "Nav_Boost_F_VEH"),
+    ("Nav_Hover_to_Boost_VEH", "Nav_Boost_F_VEH"),       // straight into the boost
+    ("Nav_Boost_to_Hover_VEH", "Deploy_Hover_VEH"),      // [5] leaving boost
+    // ascend node = hidden barrage launcher: it ticks even at zero blend weight, so its anim's own SpawnProjectile
+    // notifies fire the real homing barrage; ship_barrage() keeps them blocked until B. Costs the ascend (C) anim.
+    ("Nav_Hover_Ascent_VEH", "Rocket_TellHoverLoop_VEH"),
+];
+static mut ANIM_MAPPED: (u32, u32) = (0, 0); // (jet tree template, its FName) already mapped: a second pass would remap
+                                            // nodes whose new name is also a jet name (Nav_Boost_L_VEH)
+
+fn ship_jet_tuning(s: &Snap, set: u32) {
+    let Some(si) = s.index_of(set) else { return };
+    // ship sequences of the set: name -> (object, FName id)
+    let seqs: HashMap<String, (u32, u32)> = s.objs.iter().filter(|o| o.outer == si)
+        .map(|o| { let id = r(o.addr + 0x28); (fname(id), (o.addr, id)) }).collect();
+    // anim map on the jet tree template (once per loaded template)
+    if let Some(tree) = s.find("VEH_Plane_ANIMTREE") {
+        let done = unsafe { ANIM_MAPPED.0 == tree && ANIM_MAPPED.1 == r(tree + 4) };
+        if let (false, Some(ti)) = (done, s.index_of(tree)) {
+            let mut n = 0;
+            for o in s.objs.iter().filter(|o| o.outer == ti && fname(o.name).contains("AnimNodeSequence")) {
+                let cur = fname(r(o.addr + 0xAC));
+                if let Some((_, ship)) = SHIP_ANIM_MAP.iter().find(|(jet, _)| *jet == cur) {
+                    if let Some(&(_, id)) = seqs.get(*ship) { w(o.addr + 0xAC, id); n += 1; }
+                }
+            }
+            unsafe { ANIM_MAPPED = (tree, r(tree + 4)); }
+            log(&format!("ship anims: {n} jet tree nodes mapped"));
+        }
+    }
+    // speeds (AnimSequence +0x40 RateScale): leaving boost x2, boost engines unfold sooner x1.5
+    if let Some(&(q, _)) = seqs.get("Deploy_Hover_VEH") { wf(q + 0x40, 2.0); }
+    if let Some(&(q, _)) = seqs.get("Nav_Boost_F_VEH") { wf(q + 0x40, 1.5); }
+    // Nav_Boost_L_VEH's StopEffect (notify +0x30 Template = OmegaShip_hover_FX) switched the engines off when steering: point it
+    // at Trails_Jet_D_FX (never spawned on the ship). Notifies: AnimSequence +0x2C TArray of 12-byte {time, notify, comment}.
+    if let (Some(&(q, _)), Some(hover), Some(dummy)) = (seqs.get("Nav_Boost_L_VEH"), s.find("OmegaShip_hover_FX"), s.find("Trails_Jet_D_FX")) {
+        let (d, n) = (r(q + 0x2C), r(q + 0x30));
+        for j in 0..n.min(64) {
+            let no = r(d + j * 12 + 4);
+            if no != 0 && fname(r(no + 4)).starts_with("HmAnimNotify_StopEffect") && r(no + 0x30) == hover { w(no + 0x30, dummy); }
+        }
+    }
+    // bank at full steer: Plane_Physics (TnPlaneSimulationBlueprint) +0x74 RollDueToYawValue 77 -> 20 (the giant ship's poses
+    // break up when banked hard)
+    if let Some(pp) = s.find("Plane_Physics") { wf(pp + 0x74, 20.0); }
+    // camera: Starscream's jet strategies (HmLocationOffsetCameraBehavior +0x2C back, +0x34 up)
+    for o in &s.objs {
+        let on = s.outer_name(o);
+        if (on == "FlyingPlane_Starscream_STRATEGY" || on == "HoverPlane_Starscream_STRATEGY") && s.name(o).starts_with("HmLocationOffsetCameraBehavior_") {
+            wf(o.addr + 0x2C, -25000.0); wf(o.addr + 0x34, 7000.0);
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ sky arena
+
+const ARENA_SCALE: f32 = 8.0;
+const ARENA_HEIGHT: f32 = 20000.0;
+const UCLASS_VTABLE: u32 = 0x1290_39C8;
+
+struct Arena {
+    plat: u32,        // spawned floor actor
+    plat_name: u32,
+    center: (f32, f32, f32),
+    calls: u32,       // ARENA[3] when the spawn was requested
+    t_req: f32,
+    tp_left: u32,     // teleport writes still to do (the game overrides the first ones)
+    ground: Option<(f32, f32, f32)>, // the mission's own spawn point (pawn location when it spawned, before the arena lift)
+    on_ground: bool,  // F12 toggled to the mission spawn: no arena lift, no fall-off return
+}
+
+impl Arena {
+    fn target(&self) -> (f32, f32, f32) { if self.on_ground { self.ground.unwrap_or(self.center) } else { self.center } }
+}
+
+// Arms the F12 UFunction and the factory. Returns false if this map has no Floor_8192_STAT (not Iacon).
+fn arena_prepare(s: &Snap, pawn: u32) -> bool {
+    let mut ufn = 0;
+    let (mut fac, mut cls, mut mesh) = (0, 0, 0);
+    for o in &s.objs {
+        match s.name(o).as_str() {
+            "ToggleDebugCamera" if s.outer_name(o) == "HmCheatManager" => ufn = o.addr,
+            "Default__ActorFactoryDynamicSM" => fac = o.addr,
+            "DynamicSMActor_Spawnable" if r(o.addr) == UCLASS_VTABLE => cls = o.addr,
+            "Floor_8192_STAT" => mesh = o.addr,
+            _ => {}
+        }
+    }
+    if ufn == 0 || fac == 0 || cls == 0 || mesh == 0 { return false; }
+    let cave = arena_cave as usize as u32;
+    if r(ufn + 0x68) != cave { w(ufn + 0x68, cave); }
+    // InterpActor is bNoDelete (refused at runtime); DynamicSMActor_Spawnable spawns. The default factory swaps NewActorClass
+    // for GameplayActorClass, so set both. CollisionPreset 2 = BlockAll.
+    // the mesh is Iacon's: arena_factory_restore() puts the original back once the cave ran (the default factory outlives the level)
+    unsafe { if r(fac + 0x48) != mesh { FAC_MESH_ORIG = (fac, r(fac + 0x48)); } }
+    w(fac + 0x28, cls); w(fac + 0x3C, cls); w(fac + 0x48, mesh);
+    wf(fac + 0x4C, ARENA_SCALE); wf(fac + 0x50, ARENA_SCALE); wf(fac + 0x54, 1.0);
+    wb(fac + 0x5C, 2);
+    unsafe {
+        ARENA[0] = fac;
+        ARENA[4] = rf(pawn + 0xD8).to_bits();
+        ARENA[5] = rf(pawn + 0xDC).to_bits();
+        ARENA[6] = (rf(pawn + 0xE0) + ARENA_HEIGHT).to_bits();
+        for k in 7..10 { ARENA[k] = 0; }
+    }
+    true
+}
+
+static mut FAC_MESH_ORIG: (u32, u32) = (0, 0); // (Default__ActorFactoryDynamicSM, its StaticMesh before arena_prepare)
+
+fn arena_factory_restore() {
+    unsafe {
+        let (fac, mesh) = FAC_MESH_ORIG;
+        if fac != 0 { w(fac + 0x48, mesh); FAC_MESH_ORIG = (0, 0); }
+    }
+}
+
+// After the cave spawned it: keep Omega's physics bodies from flinging it away, and compute the landing spot.
+fn arena_spawned(a: &mut Arena, plat: u32) {
+    let comp = r(plat + 0x1CC);
+    w(comp + 0xF0, r(comp + 0xF0) & !0x0800_0000);          // component BlockRigidBody off
+    w(plat + 0x80, r(plat + 0x80) & !0x2000);                // actor BlockRigidBody off
+    w(plat + 0x78, (r(plat + 0x78) & !0x8000) | 0x800);      // bPushedByEncroachers off, bWorldGeometry on
+    a.plat = plat;
+    a.plat_name = r(plat + 4);
+    // the mesh pivot is a corner (4608 x 4608 tile), top at the pivot's Z
+    a.center = (rf(plat + 0xD8) - 2304.0 * ARENA_SCALE, rf(plat + 0xDC) + 2304.0 * ARENA_SCALE, rf(plat + 0xE0) + 2600.0);
+    a.tp_left = 3;
+    log(&format!("sky arena: floor {} at {:.0} {:.0} {:.0}", fname(a.plat_name), a.center.0, a.center.1, a.center.2));
+}
+
+fn arena_alive(a: &Arena) -> bool { a.plat != 0 && r(a.plat + 4) == a.plat_name }
+
+// Teleport works only in robot form (in vehicle form the physics body owns the position).
+fn robot_form(pawn: u32) -> bool { let c = r(pawn + 0x15C); c != 0 && c == r(pawn + 0x3F8) }
 
 // ------------------------------------------------------------------------------------------------ background state
 
@@ -689,9 +1112,11 @@ fn setup_pawn(pc: u32, pawn: u32, s: &Snap) {
 
 // Collision radius 3100 -> 800 (Omega's own radius blocks him everywhere). The game resets it after spawn and on
 // transform, so the mod loop re-applies it every tick.
+// Only in robot form: +0x15C is the active CollisionComponent, which is the pawn's CylinderComponent (+0x3F8) in robot
+// form but the vehicle's mesh component in vehicle form (writing +0x1B0 there corrupted it; crash with the ship form).
 fn keep_collision(pawn: u32) {
     let cyl = r(pawn + 0x15C);
-    if cyl != 0 && rf(cyl + 0x1B0) != 800.0 {
+    if cyl != 0 && cyl == r(pawn + 0x3F8) && rf(cyl + 0x1B0) != 800.0 {
         log(&format!("collision radius {} -> 800 (height {})", rf(cyl + 0x1B0), rf(cyl + 0x1B4)));
         wf(cyl + 0x1B0, 800.0);
     }
@@ -736,6 +1161,8 @@ fn mod_loop() {
     let mut god_pawn = 0u32; // pawn already handled
     let mut god_try: Option<(f32, u32)> = None; // (press time, dword before)
     let mut t_spawn = 0.0f32;
+    let mut barrage = (0u32, 0u32, 0.0f32, 0.0f32); // (pawn, live launcher node, last search, notifies open until)
+    let mut b_was_down = false;
     // grab sequence
     #[derive(PartialEq)]
     enum Ph { Idle, Pull, Finish, Crush, Thrown }
@@ -748,16 +1175,28 @@ fn mod_loop() {
     let mut t_hold: Option<f32> = None;
     let mut grab_pawn = 0u32;
 
+    let mut t_tank = 0.0f32;
+    // sky arena: requested on every new pawn in Iacon (spawned once, reused while it exists)
+    let mut arena = Arena { plat: 0, plat_name: 0, center: (0.0, 0.0, 0.0), calls: 0, t_req: -10.0, tp_left: 0, ground: None, on_ground: false };
+    let mut arena_want = false;
+    let mut f12_was_down = false;
     loop {
         std::thread::sleep(std::time::Duration::from_millis(50));
         let tn = now();
+        // Early Tank flip: Escalation's PlayerReplicationInfo resolves "Megatron" -> Tank chassis path through a reader the
+        // chassis cave does not see, before the first hooked read. Point the path at Omega as soon as Omega's ROBODEF is
+        // loaded; the hooked read then grafts and prepares as usual.
+        if tn - t_tank > 0.5 {
+            t_tank = tn;
+            early_tank_flip();
+        }
         // player controller (re-validate; a level change frees everything)
-        if pc == 0 || r(pc + 4) != pc_name || (r(pc + 0x14) & 0xFFF).wrapping_sub(1) != CID_PC {
+        if pc == 0 || r(pc + 4) != pc_name || !CID_PCS.contains(&(r(pc + 0x14) & 0xFFF).wrapping_sub(1)) {
             if tn - t_pc < 1.0 { continue; }
             t_pc = tn;
             let s = snapshot();
             // the live controller, not the class default object (Default__TnPlayerControllerCampaign)
-            pc = s.objs.iter().filter(|o| o.cls == CID_PC && !s.name(o).starts_with("Default__")).last().map(|o| o.addr).unwrap_or(0);
+            pc = s.objs.iter().filter(|o| CID_PCS.contains(&o.cls) && !s.name(o).starts_with("Default__")).last().map(|o| o.addr).unwrap_or(0);
             pc_name = if pc != 0 { r(pc + 4) } else { 0 };
             if pc != 0 { log(&format!("player controller {} at {pc:08X}", fname(pc_name))); }
             hud::SHOW.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -783,8 +1222,55 @@ fn mod_loop() {
                 god_off = god_offset(&s);
                 log(&format!("bGodMode dword at controller +0x{god_off:X}"));
             }
+            // the game just placed the new pawn at the mission's spawn (level start or checkpoint): remember it for F12
+            let at = (rf(pawn + 0xD8), rf(pawn + 0xDC), rf(pawn + 0xE0));
+            if !arena_alive(&arena) || at.2 < arena.center.2 - 4000.0 { arena.ground = Some(at); }
+            if arena_alive(&arena) { if !arena.on_ground { arena.tp_left = 3; } } else { arena.on_ground = false; arena_want = true; }
         }
         keep_collision(pawn);
+
+        // sky arena: spawn through F12 (game thread) once the pawn has settled, then land on its centre
+        let calls = unsafe { ARENA[3] };
+        if calls != arena.calls {
+            // the cave ran (it clears `pending` itself)
+            arena.calls = calls;
+            arena_factory_restore();
+            let plat = unsafe { ARENA[2] };
+            if plat != 0 { arena_spawned(&mut arena, plat); } else { log("sky arena: spawn failed"); }
+        } else if unsafe { ARENA[1] } != 0 {
+            if tn - arena.t_req > 2.0 {
+                unsafe { ARENA[1] = 0; } // the press was not seen (menu, window in back): retry
+                arena_factory_restore();
+                arena_want = true;
+            }
+        } else if arena_want && tn - t_spawn > 1.5 && robot_form(pawn) && game_in_front() {
+            arena_want = false;
+            if arena_prepare(&snapshot(), pawn) {
+                arena.calls = calls;
+                arena.t_req = tn;
+                unsafe { ARENA[1] = 1; }
+                press(0x7B); // F12
+            }
+        }
+        // F12 (the player's press; the arena spawn's own press is ignored for 1 s): sky arena <-> the mission's spawn point.
+        // The game also runs F12's native (arena_cave), which does nothing without a pending spawn. Robot form only (teleport).
+        let f12_down = unsafe { GetAsyncKeyState(0x7B) } as u16 & 0x8000 != 0;
+        if f12_down && !f12_was_down && game_in_front() && tn - arena.t_req > 1.0 && unsafe { ARENA[1] } == 0
+            && arena_alive(&arena) && arena.ground.is_some() && robot_form(pawn) {
+            arena.on_ground = !arena.on_ground;
+            arena.tp_left = 3;
+            log(if arena.on_ground { "F12: to the mission spawn" } else { "F12: back to the sky arena" });
+        }
+        f12_was_down = f12_down;
+        if arena_alive(&arena) && robot_form(pawn) {
+            if !arena.on_ground && rf(pawn + 0xE0) < arena.center.2 - 4000.0 && arena.tp_left == 0 { arena.tp_left = 3; } // fell off
+            if arena.tp_left > 0 {
+                arena.tp_left -= 1;
+                let (x, y, z) = arena.target();
+                wf(pawn + 0xD8, x); wf(pawn + 0xDC, y); wf(pawn + 0xE0, z);
+                wf(pawn + 0xF0, 0.0); wf(pawn + 0xF4, 0.0); wf(pawn + 0xF8, 0.0);
+            }
+        }
 
         // god mode (2 s after spawn, game in front so the F8 press reaches it; retried while ignored, e.g. cutscene)
         if let Some((t, before)) = god_try {
@@ -814,7 +1300,7 @@ fn mod_loop() {
             }
         }
         let god = if god_mask == 0 { 0 } else if r(pc + god_off) & god_mask != 0 { 2 } else { 1 };
-        hud::update(hud::View { mode: st().mode, grab: ph.hud(), god }, &MODE_TEXT);
+        hud::update(hud::View { mode: st().mode, grab: ph.hud(), god, ground: arena.on_ground }, &MODE_TEXT);
 
         // T: melee mode cycle (only while the game window is in front)
         let t_down = unsafe { GetAsyncKeyState(0x54) } as u16 & 0x8000 != 0;
@@ -824,6 +1310,27 @@ fn mod_loop() {
             missile_sockets(MODES[m].0.starts_with("missile"));
         }
         t_was_down = t_down;
+
+        // B: Omega's ship rocket barrage (one cycle of the hidden launcher node; re-found per pawn, a respawn rebuilds the tree)
+        if barrage.0 != pawn || (barrage.1 == 0 && tn - barrage.2 > 1.0) {
+            let node = if barrage.0 != pawn || barrage.1 == 0 { barrage_node(&snapshot()) } else { barrage.1 };
+            if node != 0 { barrage_block(node, true); }
+            barrage = (pawn, node, tn, 0.0);
+        }
+        let b_down = unsafe { GetAsyncKeyState(0x42) } as u16 & 0x8000 != 0;
+        if barrage.1 != 0 && r(barrage.1 + 0xAC) == name_id_cached("Rocket_TellHoverLoop_VEH").unwrap_or(0) {
+            if b_down && !b_was_down && game_in_front() && tn > barrage.3 {
+                wf(barrage.1 + 0xB8, 0.0);
+                barrage_block(barrage.1, false);
+                barrage.3 = tn + BARRAGE_CYCLE;
+            } else if barrage.3 > 0.0 && tn > barrage.3 {
+                barrage_block(barrage.1, true);
+                barrage.3 = 0.0;
+            }
+        } else if barrage.1 != 0 {
+            barrage.1 = 0; // node freed (respawn / level change): find it again
+        }
+        b_was_down = b_down;
 
         // auto-target list: nearest 4 living Autobots in front within 30000 (candidates rescanned every 3 s)
         if tn - t_scan > 3.0 {

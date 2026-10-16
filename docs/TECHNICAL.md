@@ -99,12 +99,20 @@ real work (spawn projectiles, deal damage), so playing a boss animation on the p
 Three code caves run on the game thread. A background thread handles everything that is timed or input-driven.
 
 **Loading Omega into a normal level.** `mod/DLC/DLCMaps/DLCMaps__Xe-TransEngine.ini` makes Iacon (`D3A_IAC_Base_m`) also load
-`D5_OME_BASE_m` (mesh), `D5_OME_DSN_m` (ROBODEF and AI data) and `D3B_IAC_MiddleDome_VIG_m` (his missile-launcher animations).
+`D5_OME_BASE_m` (mesh), `D5_OME_DSN_m` (ROBODEF and AI data) and `D3B_IAC_MiddleDome_VIG_m` (his missile-launcher animations), plus
+the ship: `D3B_IAC_Base_m` (ship mesh `VH_OmegaSupreme_SKEL`, ship weapon data), `D3B_IAC_GLB_DSN_m` and `D3B_IAC_Balcony_DSN_m` (ship
+physics, and the seeker-drone jet `SoldierJetDec_ROBODEF` whose vehicle form the ship uses).
 
 **Spawn (cave at `0x10A801F8`, the chassis ObjectPath read).** When the `Tank` chassis is read and Omega's ROBODEF is loaded:
-1. **Graft**: copy Megatron's values into Omega's null player fields `A4 A8 B0 D4 E8 F0 F4 F8 104 138 140 148 14C 150 160 164 168 16C`.
-   `+0x11C` (hit reactions) is deliberately left null, otherwise the giant body flinches hard on every hit.
+1. **Graft**: copy Megatron's values into Omega's null player fields `A4 A8 B0 D4 E8 F0 F4 F8 104 138 140 148 14C 150 160`
+   (object references and two floats). `+0x11C` (hit reactions) is deliberately left null, otherwise the giant body flinches hard on
+   every hit. `+0x164..+0x16C` (`BuffMaterials`, a TArray header) is **not** copied: two ROBODEFs sharing one array buffer get it freed
+   twice when the level unloads, which corrupts the allocator and crashes the next chapter load.
 2. Point the chassis ObjectPath at `TR_OmegaSupreme_ROBODEF_p.OmegaSupreme_ROBODEF`, and the PRI `+0x420` too (for the first spawn).
+   The FString at chassis `+0x78` is owned by the engine (it is re-assigned from the ini at chapter load), so each new value is a fresh
+   block from the engine allocator (GMalloc `0x12B00204`, vtable `+0xC` = `Realloc(ptr, size, align)`); the original is kept as text.
+   A background check restores Megatron's path within 0.5 s of Omega's ROBODEF unloading: choosing Megatron at chapter select looks
+   the chassis up by this path, and with Omega's path still in it the game crashed on a null chassis (`0x10B0521F`).
 3. Prepare data that is copied when the pawn and weapons are created:
    - **weapons**: Megatron's bazooka (`Bazooka_SP_WEPDATA`) fires `TnProjectileOmegaHomingRocket` (damage 150, radius 1500, scale 3);
    - **sockets**: `WeaponSocket_Primary` moves to the left missile bone, so rockets leave his left arm;
@@ -112,7 +120,37 @@ Three code caves run on the game thread. A background thread handles everything 
    - **set-piece missiles**: `TnAnimNotify_SpawnProjectile` objects that fire the set-piece rocket now fire the homing barrage rocket;
    - **melee and grab**: animation name ids, the melee set and Omega's grab description are cached.
 
-In any other level the cave puts Megatron's path back, so the rest of the game is untouched.
+In any other level Megatron's path is back, so the rest of the game is untouched.
+
+**Ship form.** No Omega vehicle definition exists in the game, so his ship goes on a player **jet** form: the seeker drone's
+`SoldierJetDecVehicleForm` (TnPlaneFormBlueprint) gets `+0x28` SkeletalMesh = `VH_OmegaSupreme_SKEL`, `+0x2C` PhysicsAsset =
+`VH_OmegaSupreme_PHYSSYS` and its one AnimSets entry (`+0x34`) = `OmegaSupreme_VEH`; Omega's ROBODEF `+0xA4` points at that form,
+`+0xA8` at Starscream's jet camera set `Plane_Starscream_CAMSET` (pulled back to 25000 / 7000), `+0xE8` (transform momentum) is null.
+This happens before the first pawn spawns (the form is fixed at spawn). The ship's own anim tree is a single AI-driven slot, so the
+jet tree `VEH_Plane_ANIMTREE` stays and its AnimNodeSequence nodes (`+0xAC` AnimSeqName) are pointed at ship sequences (hover idle,
+boost, turns, deploy). Its engines are anim notifies (`HmAnimNotify_PlayEffect`), so they play by themselves. Bank at full steer:
+`Plane_Physics` (TnPlaneSimulationBlueprint) `+0x74` RollDueToYawValue 77 → 20.
+
+**Ship weapons.** The player's vehicle weapon list comes from the character data (`Megatron_PCD_SP +0x128`, a TArray of FStrings,
+resolved through ini providers at chapter load). `mod/replace.txt` turns `[TankCannon]` into the jet machine gun
+`TnWeaponAssaultRiflePlane` (a tank cannon fires from a turret the ship lacks). At the main menu the DLL swaps Megatron's and
+Skywarp's `+0x128` array headers (a swap keeps one owner per buffer), so Megatron gets the jets' two slots. Each weapon's class
+default `+0x244` PlayerData points at Omega's own ship data (`OmegaMGSentry_WEPDATA`, `OmegaRocketSentry_WEPDATA`); weapons copy it
+when they are created, so live weapons are never written. Muzzles: the weapon mesh template's socket names (`+0xE4`) →
+`L_Rocket1` / `R_Rocket1`, the fronts of the two engines.
+
+**Rocket barrage (B).** The ship sequence `Rocket_TellHoverLoop_VEH` carries the real `TnAnimNotify_SpawnProjectile` notifies of his
+homing barrage. The jet tree's ascend node gets that sequence: the node ticks even at zero blend weight, so with notifies blocked
+(AnimNodeSequence `+0xB4` bNoNotifies `0x100`) it is a hidden launcher. B rewinds it (`+0xB8` CurrentTime = 0) and opens the
+notifies for one 2.7 s cycle.
+
+**Sky arena and F12.** F12 is bound to `ToggleDebugCamera`; that UFunction's native pointer (`+0x68`) is redirected to a cave, which
+runs on the game thread. Once after you spawn, the mod presses F12 with a spawn pending: the cave calls
+`Default__ActorFactoryDynamicSM`'s CreateActor (vtable `+0x12C`) with class `DynamicSMActor_Spawnable`, mesh `Floor_8192_STAT`,
+scale 8, BlockAll, 20000 units above you (BlockRigidBody off and bWorldGeometry on afterwards, otherwise Omega's physics bodies
+fling it away; the factory's mesh is restored right after). The mod remembers where the pawn spawned (the mission's spawn point or
+checkpoint); a player F12 in robot form then switches between that point and the arena by writing the pawn's Location (`+0xD8`)
+three times and zeroing Velocity (`+0xF0`).
 
 **After spawn (background thread).**
 - Collision radius 3100 → 800 (`cylinder +0x1B0`), checked every tick.
@@ -165,9 +203,15 @@ with GDI on the mod thread and uploaded as a managed A8R8G8B8 texture, which wor
 | `0x110031A0` | `FindClass(&cache, L"Name")` |
 | `0x119488DC` | IAT slot `d3d9!Direct3DCreate9` |
 | `0x12A03F30` | frame-rate cap float (30 / 60 / 80), from the community FPS unlocker |
+| `0x12B00204` | GMalloc (vtable `+0xC` Realloc(ptr, size, align), `+0x10` Free) |
+| `0x12B2F0A4` / `0x12B2F0F4` | GObjects / GNames |
 
 ## 7. Lessons learned and dead ends
 
+- **Never share an engine buffer between two objects.** Copy object references and numbers only. Copying a TArray or FString header
+  (or pointing one at your own memory) means a double free or a free of non-heap memory when the level unloads; the crash shows up
+  later, at the next chapter load, and looks random. Swapping two headers is fine. New engine strings must come from GMalloc.
+- **Don't write level objects from a background thread at teardown.** Objects stay listed in GObjects while their arrays are freed.
 - **Use code caves, not debugger breakpoints.** Cheat Engine's hardware-breakpoint callbacks were dropped or froze the game more than once.
 - **The pause-menu "restart from checkpoint" crashed** in the early runtime-swap tests. The death restart was fine. (The DLL doesn't need either.)
 - **Memory.** The 32-bit game is close to its 2 GB limit with the boss packages loaded. The DLL never aborts on allocation failure, and the

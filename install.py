@@ -8,7 +8,8 @@ usage:
   "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Transformers War for Cybertron"
 
 What install does (every changed game file is backed up first, as <file>.bak-playasanyone):
-  1. Coalesced.ini: adds the key bindings from mod\\bindings.ini (rebuilt from the backup each time, so installs never stack).
+  1. Coalesced.ini: adds the key bindings from mod\\bindings.ini and the config edits from mod\\replace.txt (rebuilt from the
+     backup each time, so installs never stack).
   2. Copies mod\\DLC\\DLCMaps to <game>\\DLC\\DLCMaps (makes Iacon load Omega Supreme's packages).
   3. Copies dinput8.dll (the mod) next to TWFC.exe.
   4. Sets the Large Address Aware flag on TWFC.exe (lets the 32-bit game use 4 GB; the extra boss packages need it).
@@ -65,9 +66,21 @@ def set_laa(exe, on):
         open(exe, "wb").write(d)
 
 
-def bindings():
-    f = os.path.join(HERE, "mod", "bindings.ini")
+def mod_lines(name):
+    f = os.path.join(HERE, "mod", name)
     return [l for l in open(f).read().splitlines() if l.strip() and not l.lstrip().startswith(";")]
+
+
+def bindings():
+    return mod_lines("bindings.ini")
+
+
+def edit_ini(tmp, ini, old, new):
+    f = os.path.join(tmp, INI_DIR, ini)
+    text = open(f, encoding="latin-1", newline="").read()
+    n = text.count(old)
+    assert n == 1, f"{ini}: expected the text to change exactly once, found it {n} times ({old!r})"
+    open(f, "w", encoding="latin-1", newline="").write(text.replace(old, new))
 
 
 def install(game):
@@ -84,15 +97,13 @@ def install(game):
     if os.path.exists(p["dll"]) and b"omega_mod" not in open(p["dll"], "rb").read():
         backup(p["dll"])  # someone else's dinput8.dll (another mod): keep it
 
-    print("1/4 key bindings -> Coalesced.ini")
+    print("1/4 key bindings and config edits -> Coalesced.ini")
     backup(p["ini"])
     with tempfile.TemporaryDirectory() as tmp:
         coalesced.decode(p["ini"] + SUFFIX, tmp)
-        f = os.path.join(tmp, INI_DIR, "PC-TransInput.ini")
-        text = open(f, encoding="latin-1", newline="").read()
-        assert text.count(SECTION + "\r\n") == 1, "unexpected PC-TransInput.ini layout"
-        text = text.replace(SECTION + "\r\n", SECTION + "\r\n" + "".join(l + "\r\n" for l in bindings()))
-        open(f, "w", encoding="latin-1", newline="").write(text)
+        edit_ini(tmp, "PC-TransInput.ini", SECTION + "\r\n", SECTION + "\r\n" + "".join(l + "\r\n" for l in bindings()))
+        for ini, old, new in (l.split("|") for l in mod_lines("replace.txt")):
+            edit_ini(tmp, ini, old.replace("\\n", "\r\n"), new.replace("\\n", "\r\n"))
         coalesced.encode(tmp, p["ini"])
 
     print("2/4 DLC pack -> " + p["dlc"])
