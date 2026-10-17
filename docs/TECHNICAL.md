@@ -132,12 +132,16 @@ boost, turns, deploy). Its engines are anim notifies (`HmAnimNotify_PlayEffect`)
 `Plane_Physics` (TnPlaneSimulationBlueprint) `+0x74` RollDueToYawValue 77 → 20.
 
 **Ship weapons.** The player's vehicle weapon list comes from the character data (`Megatron_PCD_SP +0x128`, a TArray of FStrings,
-resolved through ini providers at chapter load). `mod/replace.txt` turns `[TankCannon]` into the jet machine gun
-`TnWeaponAssaultRiflePlane` (a tank cannon fires from a turret the ship lacks). At the main menu the DLL swaps Megatron's and
-Skywarp's `+0x128` array headers (a swap keeps one owner per buffer), so Megatron gets the jets' two slots. Each weapon's class
-default `+0x244` PlayerData points at Omega's own ship data (`OmegaMGSentry_WEPDATA`, `OmegaRocketSentry_WEPDATA`); weapons copy it
-when they are created, so live weapons are never written. Muzzles: the weapon mesh template's socket names (`+0xE4`) →
-`L_Rocket1` / `R_Rocket1`, the fronts of the two engines.
+resolved through ini providers at chapter load). Megatron's own `TankCannon` fires from a tank turret the ship lacks, so at the main
+menu the DLL swaps Megatron's and Skywarp's `+0x128` array headers (a swap keeps one owner per buffer): Megatron gets the jets' two
+slots (`PlaneAssaultRifle`, `HomingRocketVehicle`). No ini edit is needed (v0.1.3 remapped `[TankCannon]` to the jet gun in
+`mod/replace.txt`, which made every real tank fire the jet gun; retired in v0.1.3.1). Each weapon's class default `+0x244` PlayerData
+points at Omega's own ship data (`OmegaMGSentry_WEPDATA`, `OmegaRocketSentry_WEPDATA`); weapons copy it when they are created, so live
+weapons are never written. Muzzles: the weapon mesh template's socket names (`+0xE4`) → `L_Rocket1` / `R_Rocket1`, the fronts of the
+two engines. These class defaults are shared with every jet, so the DLL sets them only while the player is Omega and puts the
+originals back otherwise. "The player" = the PlayerReplicationInfo the campaign controller points at (its field offset is found by
+scanning the controller once); the squadmates have PRIs of the same class, and reading one of theirs made the guns fire from the
+world origin (fixed in v0.1.3.1).
 
 **Rocket barrage (B).** The ship sequence `Rocket_TellHoverLoop_VEH` carries the real `TnAnimNotify_SpawnProjectile` notifies of his
 homing barrage. The jet tree's ascend node gets that sequence: the node ticks even at zero blend weight, so with notifies blocked
@@ -150,7 +154,8 @@ runs on the game thread. Once after you spawn, the mod presses F12 with a spawn 
 scale 8, BlockAll, 20000 units above you (BlockRigidBody off and bWorldGeometry on afterwards, otherwise Omega's physics bodies
 fling it away; the factory's mesh is restored right after). The mod remembers where the pawn spawned (the mission's spawn point or
 checkpoint); a player F12 in robot form then switches between that point and the arena by writing the pawn's Location (`+0xD8`)
-three times and zeroing Velocity (`+0xF0`).
+three times and zeroing Velocity (`+0xF0`). Spawn points are placed for a normal-size pawn, so the spawn point's height gets Omega's
+collision half-height (cylinder `+0x1B4`, 2400) added; without it he stood half under the floor (fixed in v0.1.3.1).
 
 **After spawn (background thread).**
 - Collision radius 3100 → 800 (`cylinder +0x1B0`), checked every tick.

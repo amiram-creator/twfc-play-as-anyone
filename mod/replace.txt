@@ -1,7 +1,6 @@
 ; Config edits applied by install.py inside Coalesced.ini, one per line: <ini file>|<exact old text>|<new text> (\n = line break).
 ; Each old text must occur exactly once.
 ;
-; Omega's ship fires a jet gun: the player's vehicle weapon TankCannon (Megatron's character data) resolves through this entry.
-; A tank cannon shoots from a tank turret, which the ship doesn't have, so it becomes the jet machine gun; the mod gives it Omega's
-; own ship-gun data.
-TransWeapons.ini|UniqueId=TankCannon\nObjectPath=TransContent.TnWeaponTankCannon|UniqueId=TankCannon\nObjectPath=TransContent.TnWeaponAssaultRiflePlane
+; v0.1.3.1: no edits. The old TankCannon -> jet machine gun remap is retired: Omega's ship now gets the jets' own two vehicle
+; weapons from the mod (at the main menu), and the remap made every real tank fire the jet machine gun. Kept for reference:
+; TransWeapons.ini|UniqueId=TankCannon\nObjectPath=TransContent.TnWeaponTankCannon|UniqueId=TankCannon\nObjectPath=TransContent.TnWeaponAssaultRiflePlane

@@ -576,9 +576,8 @@ fn point_chassis_at_omega(ch: u32) {
     set_chassis_path(ch, OMEGA_PATH_STR);
 }
 
-fn early_tank_flip() {
-    let s = snapshot();
-    ship_weapons(&s);
+fn early_tank_flip(s: &Snap) {
+    ship_weapons(s);
     let Some(ch) = s.find_cls(CID_CHASSIS, "Tank") else { return };
     if chassis_is_omega(ch) {
         // Omega unloaded (back at the menu): restore Megatron's path NOW. Choosing Megatron at chapter select looks the chassis up by
@@ -617,7 +616,8 @@ fn early_tank_flip() {
 
 fn chassis_read(esi: u32) {
     let ch = esi.wrapping_sub(0x10);
-    if fname(r(ch + 4)) != "Tank" {
+    let slot = fname(r(ch + 4));
+    if slot != "Tank" {
         return;
     }
     // already prepared for this Omega ROBODEF (same level): only re-point the path, no object scan
@@ -667,6 +667,24 @@ fn chassis_read(esi: u32) {
     }
 }
 
+// TnLocationOffsetCameraBehavior fields set for Omega's giant orbit, those values, and the template's own values before that
+const CAM_OFFS: [u32; 3] = [0x2C, 0x30, 0x34];
+const CAM_GIANT: [f32; 3] = [2500.0, 1500.0, 6000.0];
+static mut CAM_ORIG: Option<[f32; 3]> = None;
+
+// Any other player pawn (the vanilla heroes) copies the giant template too: its camera strategy's live copies live in
+// Transient (outer HmCameraStrategy_N) and are made again on form changes, so this runs every tick. Only exact giant values are
+// touched, which no other camera uses (checked in CE 2026-10-17: the rest are 0/0/800).
+fn normal_camera(s: &Snap) {
+    let Some(orig) = (unsafe { CAM_ORIG }) else { return };
+    for o in &s.objs {
+        if s.name(o).starts_with("TnLocationOffsetCameraBehavior_") && CAM_OFFS.map(|k| rf(o.addr + k)) == CAM_GIANT
+            && s.outer_name(o).starts_with("HmCameraStrategy_") {
+            for (k, v) in CAM_OFFS.iter().zip(orig) { wf(o.addr + k, v); }
+        }
+    }
+}
+
 // Data edits that must exist before Omega's weapons/camera/mesh are created (ported from omega_weapons,
 // omega_left_arm_sockets, boss_camera_giant template, omega_add_d3b_anims rocket switch).
 fn prepare_data(s: &Snap, omega: u32) {
@@ -703,10 +721,12 @@ fn prepare_data(s: &Snap, omega: u32) {
             st().missile_socks = socks.iter().filter(|x| x.0.starts_with("MissileSocket_Left_0")).map(|x| (x.1, r(x.1 + 4))).collect();
         }
     }
-    // camera: the robot camera template (copied into each new pawn's strategy) -> giant orbit
+    // camera: the robot camera template (copied into each new pawn's strategy) -> giant orbit. Shared by every robot in the level;
+    // normal_camera() puts the live copies of other pawns back to the values kept here.
     for o in &s.objs {
         if s.name(o).starts_with("TnLocationOffsetCameraBehavior_") && rf(o.addr + 0x34) == 800.0 && s.outer_name(o) == "OverTheShoulder_STRATEGY" {
-            wf(o.addr + 0x34, 6000.0); wf(o.addr + 0x2C, 2500.0); wf(o.addr + 0x30, 1500.0);
+            unsafe { CAM_ORIG = Some(CAM_OFFS.map(|k| rf(o.addr + k))); }
+            for (k, v) in CAM_OFFS.iter().zip(CAM_GIANT) { wf(o.addr + k, v); }
         }
     }
     // D3B missile spawns: set-piece rocket (no targeting) -> homing barrage rocket (ProjectileClass at +0x34)
@@ -813,6 +833,34 @@ const SHIP_GUNS: [(&str, &str); 2] = [
     ("TnWeaponHomingRocketVehicle", "OmegaRocketSentry_WEPDATA"), // slot 2: ship rockets
 ];
 
+// The game's own values of what ship_weapons changes, kept before the first write: (class default, its FName, PlayerData,
+// mesh template, muzzle socket FNames). Class defaults live for the whole session.
+static mut SHIP_ORIG: Vec<(u32, u32, u32, u32, Vec<u32>)> = Vec::new();
+
+// controller field holding its PlayerReplicationInfo (found once by scanning, see player_pri)
+static PRI_OFF: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+// The human player's own PlayerReplicationInfo: the live campaign/Escalation controller's PRI field. The AI squadmates (Iacon:
+// Soundwave, Breakdown) have PRIs of the same class, so "the first PRI with a ROBODEF" was sometimes theirs (Omega's ship guns then
+// got un-set mid-level and fired from the world origin; user 2026-10-17). The field offset is not in the cooked data: take the only
+// pointer to a PRI-class object in the controller and cache its offset.
+fn player_pri(s: &Snap) -> Option<u32> {
+    let pc = s.objs.iter().filter(|o| CID_PCS.contains(&o.cls) && !s.name(o).starts_with("Default__")).last()?.addr;
+    let is_pri = |p: u32| p > 0x10000 && rd32(p + 0x14).is_some_and(|c| CID_PRIS.contains(&(c & 0xFFF).wrapping_sub(1)));
+    let off = PRI_OFF.load(std::sync::atomic::Ordering::Relaxed);
+    if off != 0 { return Some(r(pc + off)).filter(|&p| is_pri(p)); }
+    let hits: Vec<u32> = (0x100..0x800).step_by(4).filter(|&k| is_pri(r(pc + k))).collect();
+    if hits.len() != 1 { return None; }
+    PRI_OFF.store(hits[0], std::sync::atomic::Ordering::Relaxed);
+    log(&format!("player PlayerReplicationInfo at controller +0x{:X}", hits[0]));
+    Some(r(pc + hits[0]))
+}
+
+// ROBODEF name the player's PlayerReplicationInfo will spawn (+0x420), None outside a campaign/Escalation level
+fn player_robodef(s: &Snap) -> Option<String> {
+    player_pri(s).map(|p| r(p + 0x420)).filter(|&b| b != 0).map(|b| fname(r(b + 4)))
+}
+
 fn ship_weapons(s: &Snap) {
     if let (Some(m), Some(k)) = (s.find("Megatron_PCD_SP"), s.find("Skywarp_PCD_SP")) {
         if r(m + 0x12C) == 1 && r(k + 0x12C) == 2 {
@@ -820,6 +868,13 @@ fn ship_weapons(s: &Snap) {
             log("ship guns: Megatron gets the jets' two vehicle weapons (PCD swap with Skywarp)");
         }
     }
+    // The ship setup below is shared class data, so it is only right while the player is Omega: the other jets fire these same two
+    // classes from their own WeaponSocket_Primary.
+    let omega = match player_robodef(s).as_deref() {
+        Some("OmegaSupreme_ROBODEF") | Some("Megatron_ROBODEF") => true,
+        Some(_) => false,
+        None => return,
+    };
     let (Some(l), Some(rr)) = (name_id_cached("L_Rocket1"), name_id_cached("R_Rocket1")) else { return };
     let sockets = |mesh: u32| {
         let (d, n) = (r(mesh + 0xE4), r(mesh + 0xE8));
@@ -833,9 +888,27 @@ fn ship_weapons(s: &Snap) {
     // corrupted the allocator (crash on the next chapter load, docs/TECHNICAL.md). Write only on change to keep even these rare.
     for (cls, data) in SHIP_GUNS {
         let (Some(def), Some(data)) = (s.find(&format!("Default__{cls}")), s.find(data)) else { continue };
-        if r(def + 0x244) != data { w(def + 0x244, data); }
         let tmpl = r(def + 0x28C);
-        if tmpl != 0 { sockets(tmpl); }
+        let orig = unsafe { &mut SHIP_ORIG };
+        let i = match orig.iter().position(|o| o.0 == def && o.1 == r(def + 4)) {
+            Some(i) => i,
+            None => {
+                let socks = if tmpl != 0 && (1..=8).contains(&r(tmpl + 0xE8)) { (0..r(tmpl + 0xE8)).map(|j| r(r(tmpl + 0xE4) + j * 4)).collect() } else { Vec::new() };
+                orig.push((def, r(def + 4), r(def + 0x244), tmpl, socks));
+                orig.len() - 1
+            }
+        };
+        if omega {
+            if r(def + 0x244) != data { w(def + 0x244, data); }
+            if tmpl != 0 { sockets(tmpl); }
+        } else {
+            let (_, _, pd, t, socks) = &orig[i];
+            if r(def + 0x244) != *pd { w(def + 0x244, *pd); }
+            if *t == tmpl && tmpl != 0 && r(tmpl + 0xE8) as usize == socks.len() {
+                let d = r(tmpl + 0xE4);
+                for (j, &v) in socks.iter().enumerate() { if r(d + j as u32 * 4) != v { w(d + j as u32 * 4, v); } }
+            }
+        }
     }
 }
 
@@ -1188,7 +1261,14 @@ fn mod_loop() {
         // loaded; the hooked read then grafts and prepares as usual.
         if tn - t_tank > 0.5 {
             t_tank = tn;
-            early_tank_flip();
+            let s = snapshot();
+            early_tank_flip(&s);
+            // the player is someone else than Omega (a vanilla hero): undo the giant camera on their live copies
+            let pawn = if pc != 0 && r(pc + 4) == pc_name { r(pc + 0x1C8) } else { 0 };
+            // no campaign/Escalation controller at all = nobody can be Omega; while one exists but
+            // its pawn is not known yet (level start), leave the camera alone
+            let campaign_pc = s.objs.iter().any(|o| CID_PCS.contains(&o.cls) && !s.name(o).starts_with("Default__"));
+            if (pawn != 0 && fname(r(r(pawn + 0x628) + 4)) != "OmegaSupreme_ROBODEF") || (pawn == 0 && !campaign_pc) { normal_camera(&s); }
         }
         // player controller (re-validate; a level change frees everything)
         if pc == 0 || r(pc + 4) != pc_name || !CID_PCS.contains(&(r(pc + 0x14) & 0xFFF).wrapping_sub(1)) {
@@ -1266,7 +1346,10 @@ fn mod_loop() {
             if !arena.on_ground && rf(pawn + 0xE0) < arena.center.2 - 4000.0 && arena.tp_left == 0 { arena.tp_left = 3; } // fell off
             if arena.tp_left > 0 {
                 arena.tp_left -= 1;
-                let (x, y, z) = arena.target();
+                let (x, y, mut z) = arena.target();
+                // the mission's spawn point is placed for a normal-size pawn: lift Omega by his collision half-height
+                // (+0x1B4, 2400) so he stands on the floor instead of half below it, then he drops the last bit (user 2026-10-17)
+                if arena.on_ground { z += rf(r(pawn + 0x15C) + 0x1B4); }
                 wf(pawn + 0xD8, x); wf(pawn + 0xDC, y); wf(pawn + 0xE0, z);
                 wf(pawn + 0xF0, 0.0); wf(pawn + 0xF4, 0.0); wf(pawn + 0xF8, 0.0);
             }
